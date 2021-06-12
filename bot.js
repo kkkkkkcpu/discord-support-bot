@@ -42,6 +42,8 @@ sequelize.sync({ force: false })
 
 client.on("message", async (message) => {
     try {
+        // Delete "bot pinned a message to this channel" messages
+        if (message.type === "PINS_ADD" && message.author.bot) return await message.delete();
         if (message.content.startsWith('support-setup')) {
             return await setupGuild(message);
         }
@@ -108,6 +110,26 @@ async function closeTicket(member, channel, guild, guildSettings) {
         await channel.edit({
             topic: `CLOSING ${channel.topic}`
         });
+
+        // Disable Close Ticket button
+        try {
+            const firstMessage = (await channel.messages.fetchPinned()).sort().first();
+            if (!firstMessage.content.startsWith("Author:")) {
+                throw new Error;
+            }
+            let disabledCloseButton = new disbut.MessageButton()
+                .setStyle('red')
+                .setLabel('Close Ticket')
+                .setID('close')
+                .setDisabled(true);
+            await firstMessage.edit(firstMessage.content,{
+                component: disabledCloseButton
+            });
+        } catch {
+
+        }
+
+
         var log = await createChatlog(channel);
         log += `Ticket closed by ${member.user.tag} (${member.id})`
         var attachment = new Discord.MessageAttachment(Buffer.from(log, 'utf-8'), `transcript-${channel.name}-${new Date().toISOString().slice(0,10)}.txt`);
@@ -179,12 +201,13 @@ async function createTicket(message, guildSettings) {
             .setStyle('red')
             .setLabel('Close Ticket')
             .setID('close');
-        await ticketChannel.send(`Author: ${message.author}
+        var firstMessage = await ticketChannel.send(`Author: ${message.author}
 Message:
 \`\`\`
 ${message.cleanContent.substr(0, 1900)}
 \`\`\`
 Please wait for a <@&${guildSettings.supportRole}> to respond. Click the button below or type \`support-close\` to close this ticket. Note: you and server admins will receive a transcript of all messages in this channel as-in when the ticket is closed.`, closeButton);
+        await firstMessage.pin();
         await message.delete();
     } else {
         existingChannel.send(`${message.author} You already have a ticket channel! \`\`\`
