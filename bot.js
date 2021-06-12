@@ -71,6 +71,10 @@ async function closeTicket(message, guildSettings) {
         console.log(log);
         var attachment = new Discord.MessageAttachment(Buffer.from(log, 'utf-8'), `transcript-${message.channel.name}-${new Date().toISOString().slice(0,10)}.txt`);
         await message.guild.channels.cache.get(guildSettings.transcriptChannel).send(attachment);
+        try {
+            await client.users.cache.get(message.channel.topic).send(attachment);
+        } catch { };
+
         await message.reply('Transcript generated; closing ticket in 10 seconds');
         setTimeout(async function() {
             await message.channel.delete();
@@ -94,7 +98,7 @@ async function createChatlog(message) {
     var formattedChatlog = '';
 
     messagesArr.forEach( message => {
-        formattedChatlog += message.createdAt.toLocaleString() + ' ' + message.author.username + '#' + message.author.discriminator + ' (' + message.author.id + '): ' + message.content + '\n';
+        formattedChatlog += message.createdAt.toLocaleString() + ' ' + message.author.username + '#' + message.author.discriminator + ' (' + message.author.id + '): ' + message.cleanContent + '\n';
     });
     return formattedChatlog;
 }
