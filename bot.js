@@ -25,29 +25,61 @@ const Servers = sequelize.define('servers', {
         type: DataTypes.STRING,
         allowNull: false
     },
-    categoryId: {
+    categoryList: {
         type: DataTypes.STRING,
-        allowNull: true
+        allowNull: false,
+        get() {
+            return this.getDataValue('categoryList').split(';');
+        },
+        set(val) {
+            if (!Array.isArray(val)) {
+                throw TypeError;
+            }
+            this.setDataValue('categoryList', val.join(';'));
+        }
     },
     transcriptChannel: {
         type: DataTypes.STRING,
-        allowNull: false
+        allowNull: true
     }
 });
 
-sequelize.sync({ force: false })
+sequelize.sync({ alter: true })
     .then(() => {
-        console.log(`Database & tables created!`);
+        console.log(`Database & tables updated!`);
     });
 
 client.on("message", async (message) => {
     try {
+        // Eval command for debugging.
+        /*
+        if (message.content.startsWith("s-eval")) {
+            const guildSettings = await Servers.findOne({where: {serverId: message.guild.id }});
+            if(message.author.id !== '258738798047920128') return;
+            try {
+                const code = message.content.substr(7);
+                let evaled = eval(code);
+
+                if (typeof evaled !== "string")
+                    evaled = require("util").inspect(evaled);
+
+                await message.channel.send(clean(evaled), {code:"xl"});
+            } catch (err) {
+                await message.channel.send(`\`ERROR\` \`\`\`xl\n${clean(err)}\n\`\`\``);
+            }
+        }
+
+         */
+
         // Delete "bot pinned a message to this channel" messages
-        if (message.type === "PINS_ADD" && message.author.bot) return await message.delete();
+        if (message.type === "PINS_ADD" && message.author.id === client.user.id) return await message.delete();
         if (message.content.startsWith('support-setup')) {
             return await setupGuild(message);
         }
         const guildSettings = await Servers.findOne({where: {serverId: message.guild.id }});
+        if (guildSettings == null) {
+            return;
+        }
         if (message.channel.id === guildSettings.channelId) {
             return await createTicket(message, guildSettings);
         }
@@ -57,7 +89,7 @@ client.on("message", async (message) => {
         if (message.content.startsWith('support-settings')) {
             return await fancySettings(message, guildSettings);
         }
-        if (message.content.startsWith('support-close') && isTicketChannel(message.channel, guildSettings)) {
+        if (message.content.startsWith('support-close')) {
             return await closeTicketCmd(message, guildSettings);
         }
         if (message.content.startsWith('support-add') && isTicketChannel(message.channel, guildSettings)) {
@@ -66,11 +98,35 @@ client.on("message", async (message) => {
         if (message.content.startsWith('support-help')) {
             return await helpCommand(message, guildSettings);
         }
+        if (message.content.startsWith('support-togglecategory')) {
+            return await toggleCategory(message, guildSettings);
+        }
+        if (message.content.startsWith('support-prunecategories')) {
+            return await pruneInvalidCategories(message, guildSettings);
+        }
+    }
 
-    } catch {
-
+     catch (err) {
+        console.log(err);
     }
 });
+
+async function toggleCategory(message, guildSettings) {
+    if (!( message.member.hasPermission("ADMINISTRATOR") || message.member.id === '258738798047920128')) {
+        return;
+    }
+    var category = message.channel.parentID;
+    if (guildSettings.categoryList.includes(category)) {
+        if (guildSettings.categoryList.length === 1) {
+            return await message.reply("You must have at least one category enabled!");
+        }
+        await removeCategory(message.category.id, guildSettings);
+        return await message.reply("Successfully disabled this category for ticket use. Note that all existing tickets in this category will no longer work.")
+    } else {
+        await addCategory(message.category.id, guildSettings);
+        return await message.reply("Successfully enabled this category for ticket use. Note that the bot will try to fill up other categories first before using this one.")
+    }
+}
 
 async function helpCommand(message, guildSettings) {
     const commands = new Discord.MessageEmbed()
@@ -78,12 +134,14 @@ async function helpCommand(message, guildSettings) {
         .setTitle('Commands for Support Bot')
         .setURL('https://github.com/burturt/discord-support-bot')
         .addFields(
-            { name: 'support-setup @role', value: 'Admin only; sets up a support channel and allows @role to close tickets as well as admins'},
+            { name: 'support-setup @role [#channel]', value: 'Admin only; sets up a support channel and allows @role to close tickets as well as admins and optionally specify #channel as a transcript channel. If no transcript channel is specified, transcripts will be disabled.'},
             { name: 'support-reset', value: 'Admin only; clears the setup to allow changing settings. If the same category is used when setting up again, no ticket data is lost.'},
             { name: 'support-settings', value: 'Print out current server setup information. Useful for debugging.'},
             { name: 'support-help', value: 'Show this help message'},
             { name: 'support-add @user1 @user2', value: 'Add users to a ticket. Must run in ticket channel, may contain any number of user mentions OR a **single** user ID.'},
-            { name: 'support-close', value: 'Close a ticket. Can only be run by ticket author, admins, and support role.'}
+            { name: 'support-close', value: 'Close a ticket. Can only be run by ticket author, admins, and support role.'},
+            { name: 'support-togglecategory', value: 'Admin only; toggle the use of a category for tickets. Uses category of channel command is run in.'},
+            { name: 'support-prunecategory', value: 'Automatically remove all invalid categories from settings.'}
         )
         .setFooter(`Requested by ${message.author.tag}`);
     return await message.channel.send(commands);
@@ -91,7 +149,7 @@ async function helpCommand(message, guildSettings) {
 }
 
 function isTicketChannel(channel, guildSettings) {
-    return channel.parentID === guildSettings.categoryId && channel.id !== guildSettings.channelId;
+    return guildSettings.categoryList.includes(channel.parentID) && channel.id !== guildSettings.channelId;
 }
 
 async function closeTicketCmd(message, guildSettings) {
@@ -100,10 +158,13 @@ async function closeTicketCmd(message, guildSettings) {
 
 async function closeTicket(member, channel, guild, guildSettings) {
     // Only allow support role, ticket author, and users with admin permission to close ticket
+    if (guildSettings == null || !isTicketChannel(channel, guildSettings)) {
+        return;
+    }
     if (member.hasPermission("ADMINISTRATOR") ||
         member.roles.cache.some(role => role.id === guildSettings.supportRole) ||
         member.id === channel.topic) {
-        if (channel.topic.startsWith('CLOSING')) {
+        if (channel.topic.startsWith('CLOSING') || !channel.name.startsWith('ticket-')) {
             return;
         }
         const ticketUserId = channel.topic;
@@ -129,18 +190,19 @@ async function closeTicket(member, channel, guild, guildSettings) {
 
         }
 
-
-        var log = await createChatlog(channel);
-        log += `Ticket closed by ${member.user.tag} (${member.id})`
-        var attachment = new Discord.MessageAttachment(Buffer.from(log, 'utf-8'), `transcript-${channel.name}-${new Date().toISOString().slice(0,10)}.txt`);
-        await guild.channels.cache.get(guildSettings.transcriptChannel).send(attachment);
-        try {
-            await client.users.cache.get(ticketUserId).send(attachment);
-        } catch { };
-
-        await channel.send('Transcript generated; closing ticket in 10 seconds');
+        await channel.send('Closing ticket in 10 seconds; generating transcript if enabled.');
         // await message.reply('Transcript generated; closing ticket in 10 seconds');
         setTimeout(async function() {
+            // Skip if transcript disabled
+            if (!guildSettings.transcriptChannel == null) {
+                var log = await createChatlog(channel);
+                log += `Ticket closed by ${member.user.tag} (${member.id})`
+                var attachment = new Discord.MessageAttachment(Buffer.from(log, 'utf-8'), `transcript-${channel.name}-${new Date().toISOString().slice(0,10)}.txt`);
+                await guild.channels.cache.get(guildSettings.transcriptChannel).send(attachment);
+                try {
+                    await client.users.cache.get(ticketUserId).send(attachment);
+                } catch { };
+            }
             await channel.delete();
             return;
         }, 10000);
@@ -189,11 +251,45 @@ async function createTicket(message, guildSettings) {
     }
     const existingChannel = message.guild.channels.cache.find(channel => channel.topic === message.author.id);
     if (existingChannel == null) {
-        const ticketChannel = await message.guild.channels.create(message.author.username.substr(0, 4) + '-' + message.author.discriminator, {
-            type: 'text',
-            topic: message.author.id,
-            parent: client.channels.cache.get(guildSettings.categoryId)
-        });
+        let ticketChannel, categoryIdx = -1;
+        while (ticketChannel == null && categoryIdx <= guildSettings.categoryList.length) {
+            categoryIdx++;
+            var category = client.channels.cache.get(guildSettings.categoryList[categoryIdx]);
+            if (category == null) continue;
+             try {
+                 ticketChannel = await message.guild.channels.create('ticket-' + message.author.username.substr(0, 8) + '-' + message.author.discriminator, {
+                     type: 'text',
+                     topic: message.author.id,
+                     parent: client.channels.cache.get(guildSettings.categoryList[categoryIdx])
+                 });
+             } catch {
+             }
+        }
+        // If no space left, make a new category
+        if (ticketChannel == null) {
+            var newCategory = await message.guild.channels.create('tickets-AUTOGENERATED', {
+                type: 'category',
+                permissionOverwrites: [{
+                        id: guildSettings.supportRole,
+                        allow: "VIEW_CHANNEL"
+                    },
+                    {
+                        id: message.guild.roles.everyone,
+                        deny: 'VIEW_CHANNEL'
+                    },
+                    {
+                        id: client.user,
+                        allow: 'VIEW_CHANNEL'
+                    }]
+            });
+            ticketChannel = await message.guild.channels.create('ticket-' + message.author.username.substr(0, 8) + '-' + message.author.discriminator, {
+                type: 'text',
+                topic: message.author.id,
+                parent: newCategory
+            });
+            await addCategory(newCategory.id, guildSettings);
+        }
+
         await ticketChannel.createOverwrite(message.author, {
             VIEW_CHANNEL: true
         });
@@ -218,16 +314,39 @@ ${message.cleanContent.substr(0, 1990)}
 
 };
 
+async function removeCategory(categoryId, guildSettings) {
+    var oldCategoryList = guildSettings.categoryList.map((x) => x);
+    oldCategoryList.splice(guildSettings.categoryList.indexOf(categoryId), 1);
+    await guildSettings.update({
+        categoryList: oldCategoryList
+    });
+}
+
+async function addCategory(categoryId, guildSettings) {
+    var oldCategoryList = guildSettings.categoryList.map((x) => x);
+    oldCategoryList.push(categoryId);
+    await guildSettings.update({
+        categoryList: oldCategoryList
+    });
+}
+
 async function fancySettings(message, guildSettings) {
     if (guildSettings == null) {
         return await message.reply('Server is not set up.');
     }
+    var categoryNames = '';
+    guildSettings.categoryList.forEach( categoryId => {
+        try {
+            categoryNames += client.channels.cache.get(categoryId).name + ', ';
+        } catch {categoryNames += 'deleted-category, '}
+        });
+    categoryNames = categoryNames.substr(0, categoryNames.length - 2);
     const embed = new Discord.MessageEmbed()
         .setColor('#FF0000')
         .setTitle(`Settings for Server ${message.guild.name}`)
         .addFields(
             { name: 'Support channel:', value: `<#${guildSettings.channelId}>` },
-            { name: 'Support category:', value: `${client.channels.cache.get(guildSettings.categoryId).name}` },
+            { name: 'Support categorys:', value: `${categoryNames}` },
             { name: 'Support role:', value: `${message.guild.roles.cache.get(guildSettings.supportRole).name}`}
         );
     await message.channel.send(embed);
@@ -238,33 +357,24 @@ async function setupGuild(message) {
         if (message.mentions.roles.size != 1) {
             return await message.reply('Please mention one support role');
         }
-        const transcriptChannel = await message.guild.channels.create('transcripts', {
-            type: 'text',
-            topic: 'Transcripts from support bot. Feel free to move or rename this channel anything.',
-        });
-        await transcriptChannel.overwritePermissions([
-            {
-                id: message.guild.roles.cache.get(message.mentions.roles.firstKey()).id,
-                allow: ['VIEW_CHANNEL']
-            },
-            {
-                id: message.guild.roles.everyone.id,
-                deny: ['VIEW_CHANNEL']
-            },
-            {
-                id: client.user.id,
-                allow: ['VIEW_CHANNEL']
-            }
-        ]);
+        let transcriptChannel;
+        if (message.mentions.channels.size === 1) {
+            transcriptChannel = message.mentions.channels.first().id;
+        } else {
+            transcriptChannel = null;
+        }
         await Servers.create({
             serverId: message.guild.id,
             channelId: message.channel.id,
             supportRole: message.mentions.roles.firstKey(),
-            categoryId: message.channel.parentID,
-            transcriptChannel: transcriptChannel.id
+            categoryList: [message.channel.parentID],
+            transcriptChannel: transcriptChannel
         });
 
-        return await message.reply('Setup completed! All messages sent in this channel will create a support ticket. If you wish to have a message that is not deleted, run `support-reset`, send the message, then re-setup.');
+        return await message.reply('Setup completed! All messages sent in this channel will create a support ticket. If you wish to have a message that is not deleted invite users to send a message here, edit your command message. This message will auto-delete in 10 seconds')
+            .then(message => {
+                setTimeout(() => message.delete(), 10000);
+            });
     }
 }
 
@@ -276,6 +386,7 @@ async function resetGuild(message, guildSettings) {
 }
 
 async function addCommand(message, guildSettings) {
+    if (!isTicketChannel(message.channel, guildSettings)) return;
     // Test for mentions and add all mentioned users
     if (message.mentions.members.size > 0) {
         var list = '';
@@ -309,6 +420,19 @@ async function addCommand(message, guildSettings) {
         return await message.reply(`Invalid user. Usage: \`support-add USER\` where USER can be multiple @mention or a single user id`);
     }
 
+}
+
+async function pruneInvalidCategories(message, guildSettings) {
+    if (!( message.member.hasPermission("ADMINISTRATOR") || message.member.id === '258738798047920128')) return;
+    for (const category of guildSettings.categoryList) {
+        try {
+            var tempCategory = message.guild.channels.cache.get(category);
+            if (tempCategory == null && guildSettings.categoryList.length !== 1) {
+                await removeCategory(category.id, guildSettings);
+            }
+        } catch {}
+    };
+    message.reply('Successfully removed all invalid categories.')
 }
 
 client.on('ready', () => {
