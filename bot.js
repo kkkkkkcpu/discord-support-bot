@@ -1,5 +1,7 @@
 const Discord = require("discord.js");
 const client = new Discord.Client({disableMentions: "everyone"});
+const disbut = require('discord-buttons');
+disbut(client);
 const { Sequelize, DataTypes } = require('sequelize');
 require('sqlite3');
 require('dotenv').config()
@@ -54,7 +56,7 @@ client.on("message", async (message) => {
             return await fancySettings(message, guildSettings);
         }
         if (message.content.startsWith('support-close') && message.channel.parentID === guildSettings.categoryId && message.channel.id !== guildSettings.channelId) {
-            return await closeTicket(message, guildSettings);
+            return await closeTicketCmd(message, guildSettings);
         }
 
     } catch {
@@ -62,34 +64,54 @@ client.on("message", async (message) => {
     }
 });
 
-async function closeTicket(message, guildSettings) {
+async function closeTicketCmd(message, guildSettings) {
+    return closeTicket(message.member, message.channel, message.guild, guildSettings);
+}
+
+async function closeTicket(member, channel, guild, guildSettings) {
     // Only allow support role, ticket author, and users with admin permission to close ticket
-    if (message.member.hasPermission("ADMINISTRATOR") ||
-        message.member.roles.cache.some(role => role.id === guildSettings.supportRole) ||
-        message.author.id === message.channel.topic) {
-        var log = await createChatlog(message);
-        console.log(log);
-        var attachment = new Discord.MessageAttachment(Buffer.from(log, 'utf-8'), `transcript-${message.channel.name}-${new Date().toISOString().slice(0,10)}.txt`);
-        await message.guild.channels.cache.get(guildSettings.transcriptChannel).send(attachment);
+    if (member.hasPermission("ADMINISTRATOR") ||
+        member.roles.cache.some(role => role.id === guildSettings.supportRole) ||
+        member.id === channel.topic) {
+        if (channel.topic.startsWith('CLOSING')) {
+            return;
+        }
+        await channel.edit({
+            topic: `CLOSING ${channel.topic}`
+        });
+        var log = await createChatlog(channel);
+        log += `Ticket closed by ${member.user.username}#${member.user.discriminator} (${member.id})`
+        var attachment = new Discord.MessageAttachment(Buffer.from(log, 'utf-8'), `transcript-${channel.name}-${new Date().toISOString().slice(0,10)}.txt`);
+        await guild.channels.cache.get(guildSettings.transcriptChannel).send(attachment);
         try {
-            await client.users.cache.get(message.channel.topic).send(attachment);
+            await client.users.cache.get(channel.topic).send(attachment);
         } catch { };
 
-        await message.reply('Transcript generated; closing ticket in 10 seconds');
+        await channel.send('Transcript generated; closing ticket in 10 seconds');
+        // await message.reply('Transcript generated; closing ticket in 10 seconds');
         setTimeout(async function() {
-            await message.channel.delete();
+            await channel.delete();
             return;
         }, 10000);
     }
 }
 
-async function createChatlog(message) {
+client.on('clickButton', async (button) => {
+    if (button.id === 'close') {
+        const guildSettings = await Servers.findOne({where: {serverId: button.guild.id }});
+        await closeTicket(button.clicker.member, button.channel, button.guild, guildSettings);
+    }
+    await button.defer();
+
+});
+
+async function createChatlog(channel) {
     // Fetch messages in groups of 100 because of discord limitations
-    var messagesArr = [];
+    var messagesArr = await (await channel.messages.fetch({limit: 1})).array();
     var messagesChunk;
-    var oldestMessageId = await (await message.channel.messages.fetch({limit: 1})).firstKey()
+    var oldestMessageId = await (await channel.messages.fetch({limit: 1})).firstKey()
     do {
-        messagesChunk = await message.channel.messages.fetch({limit: 100, before: oldestMessageId});
+        messagesChunk = await channel.messages.fetch({limit: 100, before: oldestMessageId});
         let sortedMsgs = messagesChunk.sort();
         oldestMessageId = await sortedMsgs.firstKey();
         messagesArr = sortedMsgs.array().concat(messagesArr);
@@ -98,7 +120,9 @@ async function createChatlog(message) {
     var formattedChatlog = '';
 
     messagesArr.forEach( message => {
-        formattedChatlog += message.createdAt.toLocaleString() + ' ' + message.author.username + '#' + message.author.discriminator + ' (' + message.author.id + '): ' + message.cleanContent + '\n';
+        if (message.content != null) {
+            formattedChatlog += message.createdAt.toLocaleString() + ' ' + message.author.username + '#' + message.author.discriminator + ' (' + message.author.id + '): ' + message.cleanContent + '\n';
+        }
     });
     return formattedChatlog;
 }
@@ -120,12 +144,16 @@ async function createTicket(message, guildSettings) {
         await ticketChannel.createOverwrite(message.author, {
             VIEW_CHANNEL: true
         });
+        let closeButton = new disbut.MessageButton()
+            .setStyle('red')
+            .setLabel('Close Ticket')
+            .setID('close');
         await ticketChannel.send(`Author: ${message.author}
 Message:
 \`\`\`
 ${message.cleanContent.substr(0, 1900)}
 \`\`\`
-Please wait for a <@&${guildSettings.supportRole}> to respond. Type \`support-close\` to close this ticket. Note: you and server admins will receive a transcript of all messages in this channel as-in when the ticket is closed.`);
+Please wait for a <@&${guildSettings.supportRole}> to respond. Click the button below or type \`support-close\` to close this ticket. Note: you and server admins will receive a transcript of all messages in this channel as-in when the ticket is closed.`, closeButton);
         await message.delete();
     } else {
         existingChannel.send(`${message.author} You already have a ticket channel! \`\`\`

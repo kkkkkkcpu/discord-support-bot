@@ -11,10 +11,11 @@
   "license": "ISC",
   "dependencies": {
     "discord.js": "^12.5.3",
-    "sqlite3": "^5.0.2"
-  },
-  "devDependencies": {
+    "sqlite3": "^5.0.2",
     "dotenv": "^10.0.0",
     "sequelize": "^6.6.2"
+  },
+  "devDependencies": {
+    "discord-buttons": "^3.2.1"
   }
 }
