@@ -288,4 +288,15 @@ async function addCommand(message, guildSettings) {
 
 }
 
+client.on('ready', () => {
+    console.log(`Logged in as ${client.user.tag}!`);
+    client.user.setPresence({
+        status: "online",
+        activity: {
+            name: "tickets. Run support-help!",
+            type: "WATCHING"
+        }
+    });
+});
+
 client.login(process.env.BOT_TOKEN);
