@@ -207,7 +207,7 @@ async function closeTicket(member, channel, guild, guildSettings, button) {
         // await message.reply('Transcript generated; closing ticket in 10 seconds');
         setTimeout(async function() {
             // Skip if transcript disabled
-            if (!guildSettings.transcriptChannel == null) {
+            if (!(guildSettings.transcriptChannel === null)) {
                 var log = await createChatlog(channel);
                 log += `Ticket closed by ${member.user.tag} (${member.id})`
                 var attachment = new Discord.MessageAttachment(Buffer.from(log, 'utf-8'), `transcript-${channel.name}-${new Date().toISOString().slice(0,10)}.txt`);
