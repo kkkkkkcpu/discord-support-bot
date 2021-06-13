@@ -140,7 +140,7 @@ async function helpCommand(message, guildSettings) {
             { name: 'support-help', value: 'Show this help message'},
             { name: 'support-add @user1 @user2', value: 'Add users to a ticket. Must run in ticket channel, may contain any number of user mentions OR a **single** user ID.'},
             { name: 'support-close', value: 'Close a ticket. Can only be run by ticket author, admins, and support role.'},
-            { name: 'support-togglecategory', value: 'Admin only; toggle the use of a category for tickets. Uses category of channel command is run in.'},
+            { name: 'support-togglecategory', value: 'Admin only; toggle the use of a category for tickets. Uses category of channel command is run in. Note: Categories should be used ONLY for tickets, transcript channel, and ticket creation channel, NOTHING ELSE.'},
             { name: 'support-prunecategory', value: 'Automatically remove all invalid categories from settings.'}
         )
         .setFooter(`Requested by ${message.author.tag}`);
@@ -149,14 +149,15 @@ async function helpCommand(message, guildSettings) {
 }
 
 function isTicketChannel(channel, guildSettings) {
-    return guildSettings.categoryList.includes(channel.parentID) && channel.id !== guildSettings.channelId;
+    if (guildSettings == null || channel == null) return false;
+    return guildSettings.categoryList.includes(channel.parentID) && channel.id !== guildSettings.channelId && channel.id !== guildSettings.transcriptChannel;
 }
 
 async function closeTicketCmd(message, guildSettings) {
-    return closeTicket(message.member, message.channel, message.guild, guildSettings);
+    return closeTicket(message.member, message.channel, message.guild, guildSettings, null);
 }
 
-async function closeTicket(member, channel, guild, guildSettings) {
+async function closeTicket(member, channel, guild, guildSettings, button) {
     // Only allow support role, ticket author, and users with admin permission to close ticket
     if (guildSettings == null || !isTicketChannel(channel, guildSettings)) {
         return;
@@ -167,12 +168,17 @@ async function closeTicket(member, channel, guild, guildSettings) {
         if (channel.topic.startsWith('CLOSING') || !channel.name.startsWith('ticket-')) {
             return;
         }
+        await channel.send('Closing ticket in 10 seconds; generating transcript if enabled.');
         const ticketUserId = channel.topic;
         await channel.edit({
             topic: `CLOSING ${channel.topic}`
         });
-
-        // Disable Close Ticket button
+        // Delete VC channel
+        var voice = await guild.channels.cache.find(guildChannel => guildChannel.name === ticketUserId || guildChannel.name === 'joinme-' + ticketUserId);
+        if (voice != null) {
+            await voice.delete();
+        }
+        if (button != null) await button.defer();
         try {
             const firstMessage = (await channel.messages.fetchPinned()).sort().first();
             if (!firstMessage.content.startsWith("Author:")) {
@@ -183,14 +189,21 @@ async function closeTicket(member, channel, guild, guildSettings) {
                 .setLabel('Close Ticket')
                 .setID('close')
                 .setDisabled(true);
-            await firstMessage.edit(firstMessage.content,{
-                component: disabledCloseButton
+            let disabledVCButton = new disbut.MessageButton()
+                .setStyle('blurple')
+                .setLabel('Voice Channel')
+                .setID('create-vc')
+                .setDisabled(true);
+            let buttonRow = new disbut.MessageActionRow()
+                .addComponent(disabledVCButton)
+                .addComponent(disabledCloseButton);
+            firstMessage.edit(firstMessage.content,{
+                component: buttonRow
             });
         } catch {
 
         }
 
-        await channel.send('Closing ticket in 10 seconds; generating transcript if enabled.');
         // await message.reply('Transcript generated; closing ticket in 10 seconds');
         setTimeout(async function() {
             // Skip if transcript disabled
@@ -212,13 +225,80 @@ async function closeTicket(member, channel, guild, guildSettings) {
 }
 
 client.on('clickButton', async (button) => {
+    const guildSettings = await Servers.findOne({where: {serverId: button.guild.id }});
     if (button.id === 'close') {
-        const guildSettings = await Servers.findOne({where: {serverId: button.guild.id }});
-        await closeTicket(button.clicker.member, button.channel, button.guild, guildSettings);
+        return await closeTicket(await button.clicker.member, button.channel, button.guild, guildSettings, button);
+    }
+    if (button.id === 'create-vc') {
+        if (isTicketChannel(button.channel, guildSettings)) {
+
+            var voice = await button.guild.channels.cache.find(guildChannel => guildChannel.name === button.channel.topic || guildChannel.name === 'joinme-' + button.channel.topic);
+            if (voice != null) {
+                return;
+            }
+
+            var permissionOverriddes = button.channel.permissionOverwrites;
+            var voiceChannel = await button.guild.channels.create('joinme-' + button.channel.topic, {
+                permissionOverwrites: permissionOverriddes,
+                type: 'voice',
+                parent: await getOpenTicketCategory(button.guild, guildSettings)
+            });
+
+            await button.channel.send(`<@${button.clicker.user.id}>, <#${voiceChannel.id}> has been created. If no one joins within 30 seconds or if everyone leaves, the voice channel will be deleted.`);
+            setTimeout(async () => {
+                if (voiceChannel != null && voiceChannel.name === 'joinme-' + button.channel.topic) {
+                    await voiceChannel.delete();
+                    button.channel.send("No one joined the voice channel in 30 seconds; deleting.");
+                    await enableVoiceChannelButton(button.channel);
+                }
+            }, 30000)
+            const firstMessage = (await button.channel.messages.fetchPinned()).sort().first();
+            if (!firstMessage.content.startsWith("Author:")) {
+                throw new Error;
+            }
+            let closeButton = new disbut.MessageButton()
+                .setStyle('red')
+                .setLabel('Close Ticket')
+                .setID('close')
+            let disabledVCButton = new disbut.MessageButton()
+                .setStyle('blurple')
+                .setLabel('Voice Channel')
+                .setID('create-vc')
+                .setDisabled(true);
+            let buttonRow = new disbut.MessageActionRow()
+                .addComponent(disabledVCButton)
+                .addComponent(closeButton);
+            firstMessage.edit(firstMessage.content,{
+                component: buttonRow
+            });
+
+
+        }
     }
     await button.defer();
 
 });
+
+async function enableVoiceChannelButton(channel) {
+    const firstMessage = (await channel.messages.fetchPinned()).sort().first();
+    if (!firstMessage.content.startsWith("Author:")) {
+        throw new Error;
+    }
+    let closeButton = new disbut.MessageButton()
+        .setStyle('red')
+        .setLabel('Close Ticket')
+        .setID('close')
+    let VCButton = new disbut.MessageButton()
+        .setStyle('blurple')
+        .setLabel('Voice Channel')
+        .setID('create-vc');
+    let buttonRow = new disbut.MessageActionRow()
+        .addComponent(VCButton)
+        .addComponent(closeButton);
+    await firstMessage.edit(firstMessage.content,{
+        component: buttonRow
+    });
+}
 
 async function createChatlog(channel) {
     // Fetch messages in groups of 100 because of discord limitations
@@ -242,6 +322,40 @@ async function createChatlog(channel) {
     return formattedChatlog;
 }
 
+async function getOpenTicketCategory(guild, guildSettings) {
+    let categoryChannel, categoryIdx = -1;
+    while (categoryChannel == null && categoryIdx <= guildSettings.categoryList.length) {
+        categoryIdx++;
+        var category = await client.channels.cache.get(guildSettings.categoryList[categoryIdx]);
+        if (category == null) continue;
+        if (category.children.size < 50) {
+            categoryChannel = category;
+        }
+    }
+    // If no space left, make a new category
+    if (categoryChannel == null) {
+        var newCategory = await guild.channels.create('tickets-AUTOGENERATED', {
+            type: 'category',
+            permissionOverwrites: [{
+                id: guildSettings.supportRole,
+                allow: "VIEW_CHANNEL"
+            },
+                {
+                    id: guild.roles.everyone,
+                    deny: 'VIEW_CHANNEL'
+                },
+                {
+                    id: client.user,
+                    allow: 'VIEW_CHANNEL'
+                }]
+        });
+
+        await addCategory(newCategory.id, guildSettings);
+        categoryChannel = newCategory;
+    }
+    return categoryChannel;
+}
+
 async function createTicket(message, guildSettings) {
     if (message.author.bot) {
         if (message.author.id !== client.user.id) {
@@ -251,44 +365,14 @@ async function createTicket(message, guildSettings) {
     }
     const existingChannel = message.guild.channels.cache.find(channel => channel.topic === message.author.id);
     if (existingChannel == null) {
-        let ticketChannel, categoryIdx = -1;
-        while (ticketChannel == null && categoryIdx <= guildSettings.categoryList.length) {
-            categoryIdx++;
-            var category = client.channels.cache.get(guildSettings.categoryList[categoryIdx]);
-            if (category == null) continue;
-             try {
-                 ticketChannel = await message.guild.channels.create('ticket-' + message.author.username.substr(0, 8) + '-' + message.author.discriminator, {
-                     type: 'text',
-                     topic: message.author.id,
-                     parent: client.channels.cache.get(guildSettings.categoryList[categoryIdx])
-                 });
-             } catch {
-             }
-        }
-        // If no space left, make a new category
-        if (ticketChannel == null) {
-            var newCategory = await message.guild.channels.create('tickets-AUTOGENERATED', {
-                type: 'category',
-                permissionOverwrites: [{
-                        id: guildSettings.supportRole,
-                        allow: "VIEW_CHANNEL"
-                    },
-                    {
-                        id: message.guild.roles.everyone,
-                        deny: 'VIEW_CHANNEL'
-                    },
-                    {
-                        id: client.user,
-                        allow: 'VIEW_CHANNEL'
-                    }]
-            });
-            ticketChannel = await message.guild.channels.create('ticket-' + message.author.username.substr(0, 8) + '-' + message.author.discriminator, {
-                type: 'text',
-                topic: message.author.id,
-                parent: newCategory
-            });
-            await addCategory(newCategory.id, guildSettings);
-        }
+
+        var category = await getOpenTicketCategory(message.guild, guildSettings);
+        let ticketChannel = await message.guild.channels.create('ticket-' + message.author.username.substr(0, 8) + '-' + message.author.discriminator, {
+            type: 'text',
+            topic: message.author.id,
+            parent: category
+        });
+
 
         await ticketChannel.createOverwrite(message.author, {
             VIEW_CHANNEL: true
@@ -297,17 +381,24 @@ async function createTicket(message, guildSettings) {
             .setStyle('red')
             .setLabel('Close Ticket')
             .setID('close');
+        let VCButton = new disbut.MessageButton()
+            .setStyle('blurple')
+            .setLabel('Voice Channel')
+            .setID('create-vc');
+        let buttonRow = new disbut.MessageActionRow()
+            .addComponent(VCButton)
+            .addComponent(closeButton)
         var firstMessage = await ticketChannel.send(`Author: ${message.author}
 Message:
 \`\`\`
 ${message.cleanContent.substr(0, 1900)}
 \`\`\`
-Please wait for a <@&${guildSettings.supportRole}> to respond. Click the button below or type \`support-close\` to close this ticket. Note: you and server admins will receive a transcript of all messages in this channel as-in when the ticket is closed.`, closeButton);
+Please wait for a <@&${guildSettings.supportRole}> to respond. Click the button below or type \`support-close\` to close this ticket. Note: you and server admins will receive a transcript of all messages in this channel as-in when the ticket is closed.`, buttonRow);
         await firstMessage.pin();
         await message.delete();
     } else {
         existingChannel.send(`${message.author} You already have a ticket channel! \`\`\`
-${message.cleanContent.substr(0, 1990)}
+${message.cleanContent.substr(0, 1950)}
 \`\`\``);
         await message.delete();
     }
@@ -445,5 +536,45 @@ client.on('ready', () => {
         }
     });
 });
+
+client.on('voiceStateUpdate', async (oldState, newState) => {
+    var guildSettings = await Servers.findOne({where: {serverId: oldState.guild.id}});
+    if (guildSettings === null) return;
+
+    if (newState.channelID === null) await voiceLeave(oldState, guildSettings);
+    else if (oldState.channelID === null) await voiceJoin(newState, guildSettings);
+    else {
+        await voiceJoin(newState, guildSettings);
+        await voiceLeave(oldState, guildSettings);
+    }
+
+});
+
+async function voiceJoin(voiceState, guildSettings) {
+    if (!isTicketChannel(voiceState.channel, guildSettings)) return;
+    // Rename ticket voice channels from `joinme-ID` to `ID` when someone joins to tell bot not to delete it after 30 seconds, otherwise do nothing
+    if (voiceState.channel.name.startsWith("joinme-")) {
+        await voiceState.channel.edit({
+            name: voiceState.channel.name.substr(7)
+        });
+    }
+}
+
+async function voiceLeave(voiceState, guildSettings) {
+    if (!isTicketChannel(voiceState.channel, guildSettings)) return;
+    // If ticket channel and empty (not including bots), delete
+    var members = voiceState.channel.members.array();
+    for (let pair of members) {
+        if (!pair[0].user.bot) return;
+    };
+
+    var text = await voiceState.guild.channels.cache.find(guildChannel => voiceState.channel.name === guildChannel.topic || voiceState.channel.name.substr(7) === guildChannel.topic);
+
+    if (text != null) {
+        await enableVoiceChannelButton(text);
+    }
+
+    await voiceState.channel.delete();
+}
 
 client.login(process.env.BOT_TOKEN);
