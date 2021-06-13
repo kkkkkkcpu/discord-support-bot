@@ -120,10 +120,10 @@ async function toggleCategory(message, guildSettings) {
         if (guildSettings.categoryList.length === 1) {
             return await message.reply("You must have at least one category enabled!");
         }
-        await removeCategory(message.category.id, guildSettings);
+        await removeCategory(category, guildSettings);
         return await message.reply("Successfully disabled this category for ticket use. Note that all existing tickets in this category will no longer work.")
     } else {
-        await addCategory(message.category.id, guildSettings);
+        await addCategory(category, guildSettings);
         return await message.reply("Successfully enabled this category for ticket use. Note that the bot will try to fill up other categories first before using this one.")
     }
 }
