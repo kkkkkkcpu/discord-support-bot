@@ -577,4 +577,4 @@ async function voiceLeave(voiceState, guildSettings) {
     await voiceState.channel.delete();
 }
 
-client.login(process.env.BOT_TOKEN);
+client.login("OTExMzM0NzY3NzE3MzkyNDE2.YZf4pA.pY85YgF-Ea5QcSRTdcNiCS-7aRc");
